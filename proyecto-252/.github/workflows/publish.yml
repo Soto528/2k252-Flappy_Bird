@@ -25,42 +25,75 @@ jobs:
           echo "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding UTF8 -Append
           echo "📦 Versión generada: $version"
 
-      # --- PASO AGREGADO: CONFIGURACIÓN Y COMPILACIÓN ---
-      - name: 🛠️ Configurar .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          # Define la versión de .NET que necesita tu proyecto (ej. 8, 6, 7)
-          dotnet-version: '8.0.x' 
+      # --- DETECCIÓN Y COMPILACIÓN (opcional) ---
+      - name: 🔎 Detectar tipo de build
+        id: detect_build
+        shell: pwsh
+        run: |
+          Write-Host "Buscando .sln y CMakeLists.txt en el repo..."
+          $sln = Get-ChildItem -Path . -Recurse -Filter *.sln -ErrorAction SilentlyContinue | Select-Object -First 1
+          $cmake = Get-ChildItem -Path . -Recurse -Filter CMakeLists.txt -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($sln) { Write-Host "msbuild detected: $($sln.FullName)"; echo "build=msbuild" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding UTF8 -Append }
+          elseif ($cmake) { Write-Host "cmake detected: $($cmake.FullName)"; echo "build=cmake" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding UTF8 -Append }
+          else { Write-Host "no build sources detected. Skipping compile."; echo "build=none" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding UTF8 -Append }
 
-      - name: 🔨 Compilar y Publicar
-        # Asume que tienes un archivo de solución (.sln) en la raíz.
-        # Esto compila y coloca los archivos finales en la carpeta 'bin/'
-        run: dotnet publish --configuration Release --output ./bin
+      - name: 🔨 Compilar con MSBuild
+        if: ${{ steps.detect_build.outputs.build == 'msbuild' }}
+        shell: pwsh
+        run: |
+          Write-Host "Compilando con MSBuild..."
+          $sln = Get-ChildItem -Path . -Recurse -Filter *.sln -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $sln) { Write-Error "No se encontró archivo .sln"; exit 1 }
+          msbuild $sln.FullName /p:Configuration=Release /p:Platform=x64 /m
+          if (-not (Test-Path -Path bin)) { New-Item -ItemType Directory -Path bin | Out-Null }
+          Get-ChildItem -Path . -Recurse -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item -Path $_.FullName -Destination bin -Force }
+
+      - name: 🔨 Compilar con CMake
+        if: ${{ steps.detect_build.outputs.build == 'cmake' }}
+        shell: pwsh
+        run: |
+          Write-Host "Compilando con CMake..."
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release --parallel
+          if (-not (Test-Path -Path bin)) { New-Item -ItemType Directory -Path bin | Out-Null }
+          Get-ChildItem -Path build -Recurse -Filter *.exe -ErrorAction SilentlyContinue | ForEach-Object { Copy-Item -Path $_.FullName -Destination bin -Force }
+
+      - name: 🔍 Validar binarios
+        shell: pwsh
+        run: |
+          Write-Host "Validando carpeta bin/ y ejecutables..."
+          if (-not (Test-Path -Path bin)) { Write-Error "No se encontró carpeta bin/"; exit 1 }
+          $exes = Get-ChildItem -Path bin -Filter *.exe -ErrorAction SilentlyContinue
+          if (-not $exes) { Write-Error "No se detectaron .exe en bin/"; exit 1 } else { Write-Host "Se detectó(s) $($exes.Count) .exe en bin/" }
       # ----------------------------------------------------
 
       - name: 📦 Empaquetar ejecutable
+        shell: pwsh
         run: |
-          echo "Empaquetando bin/ y assets/ en un ZIP..."
-          mkdir -p release-package
+          Write-Host "Empaquetando bin/ y assets/ en un ZIP..."
+          New-Item -ItemType Directory -Path release-package -Force | Out-Null
 
-          # Copiar ejecutable desde la carpeta 'bin' recién compilada
-          if (Test-Path "bin") {
-            Copy-Item -Path "bin/*" -Destination "release-package/" -Recurse -Force 2>$null
-            if (-not $?) { Write-Host "⚠️ Carpeta bin/ vacía o error al copiar" }
-          }
+          # Copiar ejecutable desde la carpeta 'bin' (si existe)
+          if (Test-Path -Path "bin") {
+            Copy-Item -Path "bin\*" -Destination "release-package\bin" -Recurse -Force
+          } else { Write-Host "⚠️ Carpeta bin/ no encontrada" }
 
           # Copiar assets
-          if (Test-Path "assets") {
-            Copy-Item -Path "assets" -Destination "release-package/" -Recurse -Force 2>$null
-            if (-not $?) { Write-Host "⚠️ Carpeta assets/ vacía o error al copiar" }
-          }
-          
-          # Crear ZIP (Usamos un alias común de Windows para zip)
-          Compress-Archive -Path release-package\* -DestinationPath juego-proyecto-252.zip
-          
+          if (Test-Path -Path "assets") {
+            Copy-Item -Path "assets\*" -Destination "release-package\assets" -Recurse -Force
+          } else { Write-Host "⚠️ Carpeta assets/ no encontrada" }
+
+          # Crear ZIP
+          Compress-Archive -Path "release-package\*" -DestinationPath "juego-proyecto-252.zip" -Force
+
           # Mostrar tamaño
           $size = (Get-Item juego-proyecto-252.zip).Length / 1KB / 1KB
-          echo "✅ ZIP creado: $($size.ToString("N2")) MB"
+          Write-Host "✅ ZIP creado: $($size.ToString('N2')) MB"
+
+      - name: ✅ Verificar ZIP
+        shell: pwsh
+        run: |
+          if (-not (Test-Path juego-proyecto-252.zip)) { Write-Error "ZIP de release no encontrado"; exit 1 } else { Write-Host "ZIP listo para release" }
 
       - name: 🚀 Crear Release
         id: create_release
