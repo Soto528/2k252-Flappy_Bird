@@ -1,0 +1,141 @@
+name: Publicar y Desplegar en Galería CETUS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    # ⚠️ IMPORTANTE: Ejecutamos en Windows porque la mayoría de los ejecutables de VS son de Windows.
+    runs-on: windows-latest
+
+    steps:
+      - name: 📥 Checkout código
+        uses: actions/checkout@v4
+
+      - name: 🔢 Generar versión
+        id: version
+        # Usamos PowerShell (por ser Windows) para generar la versión
+        run: |
+          $version = "v1.0.${{ github.run_number }}"
+          echo "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding UTF8 -Append
+          echo "📦 Versión generada: $version"
+
+      # --- PASO AGREGADO: CONFIGURACIÓN Y COMPILACIÓN ---
+      - name: 🛠️ Configurar .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          # Define la versión de .NET que necesita tu proyecto (ej. 8, 6, 7)
+          dotnet-version: '8.0.x' 
+
+      - name: 🔨 Compilar y Publicar
+        # Asume que tienes un archivo de solución (.sln) en la raíz.
+        # Esto compila y coloca los archivos finales en la carpeta 'bin/'
+        run: dotnet publish --configuration Release --output ./bin
+      # ----------------------------------------------------
+
+      - name: 📦 Empaquetar ejecutable
+        run: |
+          echo "Empaquetando bin/ y assets/ en un ZIP..."
+          mkdir -p release-package
+
+          # Copiar ejecutable desde la carpeta 'bin' recién compilada
+          if (Test-Path "bin") {
+            Copy-Item -Path "bin/*" -Destination "release-package/" -Recurse -Force 2>$null
+            if (-not $?) { Write-Host "⚠️ Carpeta bin/ vacía o error al copiar" }
+          }
+
+          # Copiar assets
+          if (Test-Path "assets") {
+            Copy-Item -Path "assets" -Destination "release-package/" -Recurse -Force 2>$null
+            if (-not $?) { Write-Host "⚠️ Carpeta assets/ vacía o error al copiar" }
+          }
+          
+          # Crear ZIP (Usamos un alias común de Windows para zip)
+          Compress-Archive -Path release-package\* -DestinationPath juego-proyecto-252.zip
+          
+          # Mostrar tamaño
+          $size = (Get-Item juego-proyecto-252.zip).Length / 1KB / 1KB
+          echo "✅ ZIP creado: $($size.ToString("N2")) MB"
+
+      - name: 🚀 Crear Release
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Release ${{ steps.version.outputs.version }}
+          body: |
+            ## 🎮 Proyecto 252 - Release ${{ steps.version.outputs.version }}
+            
+            **Commit:** ${{ github.sha }}
+            **Autor:** ${{ github.event.head_commit.author.name }}
+            **Fecha:** ${{ github.event.head_commit.timestamp }}
+            
+            ### 📝 Mensaje del Commit
+            ${{ github.event.head_commit.message }}
+            
+            ### ⬇️ Descarga
+            Descarga `juego-proyecto-252.zip` para jugar.
+          draft: false
+          prerelease: false
+          files: |
+            juego-proyecto-252.zip
+
+      - name: 📡 Notificar a CETUS
+        # Nota: Aquí usamos la herramienta CURL, que está disponible en la mayoría de los sistemas.
+        run: |
+          echo "🔔 Enviando notificación a CETUS..."
+          $RELEASE_URL="${{ steps.create_release.outputs.url }}"
+          
+          # Construir payload JSON
+          $Payload = @{
+              action = "published"
+              repository = @{
+                  full_name = "${{ github.repository }}"
+                  html_url = "${{ github.event.repository.html_url }}"
+              }
+              release = @{
+                  tag_name = "${{ steps.version.outputs.version }}"
+                  html_url = "$RELEASE_URL"
+                  target_commitish = "${{ github.sha }}"
+                  assets = @(
+                      @{
+                          name = "juego-proyecto-252.zip"
+                          browser_download_url = "https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/juego-proyecto-252.zip"
+                          size = (Get-Item juego-proyecto-252.zip).Length
+                      }
+                  )
+              }
+          } | ConvertTo-Json
+
+          # Guardar payload
+          $Payload | Out-File payload.json -Encoding UTF8
+
+          # Enviar webhook
+          curl -X POST https://cetus.logiasimbolica.com/api/webhook/github `
+            -H "Content-Type: application/json" `
+            -H "X-GitHub-Event: release" `
+            -d "@payload.json" `
+            -w "`n📊 Status: %{http_code}`n"
+            
+          if ($LASTEXITCODE -ne 0) { Write-Host "⚠️ Error al notificar a CETUS (el proyecto aún se puede ver en GitHub Releases)" }
+          else { Write-Host "✅ Proceso completado" }
+
+
+      - name: 📋 Resumen
+        run: |
+          echo "## 🎉 Publicación Exitosa" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **Versión:** ${{ steps.version.outputs.version }}" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **Commit:** \`${{ github.sha }}\`" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **Release:** [Ver en GitHub](${{ steps.create_release.outputs.url }})" >> $env:GITHUB_STEP_SUMMARY
+          echo "- **Descarga:** [juego-proyecto-252.zip](https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.version }}/juego-proyecto-252.zip)" >> $env:GITHUB_STEP_SUMMARY
+          echo "" >> $env:GITHUB_STEP_SUMMARY
+          echo "Tu proyecto se actualizará en la galería CETUS en unos momentos." >> $env:GITHUB_STEP_SUMMARY
+          
